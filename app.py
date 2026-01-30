@@ -6,19 +6,41 @@ import pandas as pd
 import datetime
 import os
 import json
+import altair as alt # Buat bikin grafik keren
 
-# 1. SETUP HALAMAN (Mode Lebar biar kayak Dashboard Profesional)
-st.set_page_config(page_title="Mentawai Market Pro", page_icon="📈", layout="wide")
+# 1. SETUP HALAMAN (Full Screen & Judul Keren)
+st.set_page_config(
+    page_title="Mentawai Smart Market", 
+    page_icon="🌴", 
+    layout="wide",
+    initial_sidebar_state="collapsed" # Sidebar nutup dulu biar luas
+)
 
-# Fungsi konversi waktu UTC ke WIB
+# --- CSS HACK (BIAR TAMPILAN MAKIN CANGGIH & BERSIH) ---
+st.markdown("""
+<style>
+    [data-testid="stMetricValue"] {
+        font-size: 24px;
+        color: #00CC96;
+    }
+    .stAlert {
+        border-radius: 10px;
+    }
+    /* Sembunyikan menu standar biar kayak aplikasi native */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
+
+# Fungsi Waktu WIB
 def format_wib(waktu_utc):
     if waktu_utc:
-        # Tambah 7 jam untuk WIB
         wib = waktu_utc + datetime.timedelta(hours=7)
-        return wib.strftime("%d %b %Y - %H:%M WIB")
+        return wib.strftime("%d %b %H:%M")
     return "-"
 
-# 2. KONEKSI DATABASE (Hybrid: Laptop & Cloud)
+# 2. KONEKSI DATABASE
 try:
     if not firebase_admin._apps:
         if os.path.exists("kunci.json"):
@@ -30,115 +52,149 @@ try:
         firebase_admin.initialize_app(cred)
     db = firestore.client()
 except Exception as e:
-    st.error(f"Gagal koneksi database: {e}")
+    st.error(f"Database Error: {e}")
     st.stop()
 
-# --- SIDEBAR: AREA INPUT (KHUSUS WARGA/PENGEPUL) ---
-with st.sidebar:
-    st.header("📝 Input Laporan Warga")
-    st.info("Fitur ini untuk kontributor harga di lapangan.")
+# --- LOGIKA NAVIGASI (TAB MENU) ---
+# Biar petani gak bingung, kita bagi jadi 2 Tab Besar
+tab1, tab2 = st.tabs(["📊 CEK HARGA PASAR", "📝 LAPOR HARGA BARU"])
+
+# ================= TAB 1: DASHBOARD PETANI (VIEW ONLY) =================
+with tab1:
+    # Header Hero
+    st.markdown("# 🌴 Mentawai Market Intelligence")
+    st.markdown("### *Pusat Data Harga Komoditas Real-Time Antar-Desa*")
+    st.caption(f"Update Terakhir: {datetime.datetime.now().strftime('%H:%M WIB')}")
+    st.divider()
+
+    # --- SEARCH ENGINE CANGGIH ---
+    col_search1, col_search2, col_search3 = st.columns([2,2,1])
     
-    input_nama = st.selectbox("Komoditas", ["Kopra Kering", "Cengkeh", "Gurita", "Pinang", "Kakao", "Ikan Kerapu", "Lainnya"])
-    input_harga = st.number_input("Harga per Kg (Rp)", min_value=0, step=500)
-    input_lokasi = st.text_input("Lokasi (Kecamatan/Desa)", placeholder="Contoh: Sikakap")
-    input_sumber = st.selectbox("Status Pelapor", ["Petani", "Pengepul Kecil", "Gudang Besar", "Masyarakat"])
+    with col_search1:
+        # List Komoditas Lengkap
+        pilih_komoditas = st.selectbox("🔍 Mau cek harga apa?", 
+            ["Semua", "Kopra Kering", "Cengkeh", "Pinang", "Gurita", "Kakao", 
+             "Ikan Kerapu", "Lobster", "Nilam", "Rotan", "Manau", "Gaharu", "Sagu"])
     
-    if st.button("Kirim Data 🚀", use_container_width=True):
-        if input_harga > 0 and input_lokasi:
+    with col_search2:
+        cari_lokasi = st.text_input("📍 Cari Dusun/Desa/Kecamatan:", placeholder="Ketik: Taileleu, Sikakap, Siberut...")
+    
+    with col_search3:
+        st.write("") # Spacer
+        st.write("")
+        tombol_refresh = st.button("🔄 Refresh Data")
+
+    # --- TARIK DATA ---
+    docs = db.collection('harga_realtime').order_by('waktu_ambil', direction=firestore.Query.DESCENDING).limit(200).stream()
+    
+    data_list = []
+    for doc in docs:
+        d = doc.to_dict()
+        lokasi_raw = d.get('lokasi', '-')
+        # Gabungin sumber & lokasi biar informatif
+        sumber_lengkap = f"{d.get('sumber')} ({lokasi_raw})"
+        
+        data_list.append({
+            "Komoditas": d.get('komoditas'),
+            "Harga": d.get('range_harga'),
+            "Harga_Angka": d.get('harga_angka', 0),
+            "Lokasi": lokasi_raw,
+            "Detail Sumber": sumber_lengkap,
+            "Waktu": format_wib(d.get('waktu_ambil')),
+            "Raw_Time": d.get('waktu_ambil')
+        })
+    
+    df = pd.DataFrame(data_list)
+
+    # --- FILTER LOGIC ---
+    if not df.empty:
+        if pilih_komoditas != "Semua":
+            df = df[df['Komoditas'] == pilih_komoditas]
+        if cari_lokasi:
+            df = df[df['Lokasi'].str.contains(cari_lokasi, case=False, na=False)]
+
+        # --- FITUR "WOW": STATISTIK & GRAFIK ---
+        if pilih_komoditas != "Semua" and not df.empty:
+            # 1. Kartu Statistik
+            avg = df['Harga_Angka'].mean()
+            max_p = df['Harga_Angka'].max()
+            min_p = df['Harga_Angka'].min()
+            
+            st.markdown(f"#### Statistik Harga: {pilih_komoditas}")
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Tertinggi", f"Rp {max_p:,.0f}".replace(",", "."))
+            k2.metric("Rata-Rata", f"Rp {avg:,.0f}".replace(",", "."))
+            k3.metric("Terendah", f"Rp {min_p:,.0f}".replace(",", "."))
+            
+            # 2. Grafik Tren Harga (Line Chart)
+            st.markdown("#### 📈 Tren Pergerakan Harga")
+            chart_data = df.sort_values('Raw_Time')
+            
+            c = alt.Chart(chart_data).mark_line(point=True).encode(
+                x=alt.X('Waktu', title='Waktu Laporan'),
+                y=alt.Y('Harga_Angka', title='Harga (Rp)'),
+                tooltip=['Komoditas', 'Harga', 'Lokasi', 'Waktu']
+            ).interactive()
+            
+            st.altair_chart(c, use_container_width=True)
+
+        # --- TABEL DATA ---
+        st.markdown("### 📋 Laporan Terbaru")
+        st.dataframe(
+            df[['Komoditas', 'Harga', 'Detail Sumber', 'Waktu']],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Komoditas": st.column_config.TextColumn("Komoditas", width="small"),
+                "Detail Sumber": st.column_config.TextColumn("Lokasi & Sumber", width="large"),
+            }
+        )
+    else:
+        st.info("🚧 Belum ada data untuk pencarian ini. Jadilah yang pertama melapor di Tab sebelah! 👉")
+
+# ================= TAB 2: FORM LAPOR (INPUT) =================
+with tab2:
+    col_form1, col_form2 = st.columns([1,1])
+    
+    with col_form1:
+        st.subheader("📝 Form Kontributor")
+        st.write("Bagi Petani, Pengepul, atau Warga yang ingin berbagi info harga valid.")
+        
+        in_nama = st.selectbox("Jenis Komoditas", 
+            ["Kopra Kering", "Cengkeh", "Pinang", "Gurita", "Kakao", "Ikan Kerapu", "Lobster", "Nilam", "Rotan", "Manau", "Gaharu", "Sagu", "Lainnya"])
+        
+        in_harga = st.number_input("Harga per Kg (Rupiah)", min_value=0, step=500, help="Masukkan angka saja tanpa titik/koma")
+        
+    with col_form2:
+        st.write("") # Spacer biar sejajar
+        st.write("") 
+        # Lokasi lebih spesifik
+        in_dusun = st.text_input("Nama Dusun / Desa", placeholder="Contoh: Dusun Bose, Desa Muara Sikabaluan")
+        in_kecamatan = st.selectbox("Kecamatan", ["Sikakap", "Pagai Utara", "Pagai Selatan", "Sipora Utara", "Sipora Selatan", "Siberut Selatan", "Siberut Barat", "Siberut Utara", "Siberut Tengah", "Siberut Barat Daya"])
+        
+        in_sumber = st.radio("Status Anda:", ["Petani", "Pengepul Desa", "Toke Besar", "Warga Biasa"], horizontal=True)
+
+    # Tombol Kirim Besar
+    if st.button("KIRIM LAPORAN SEKARANG 🚀", type="primary", use_container_width=True):
+        if in_harga > 0 and in_dusun:
+            lokasi_fix = f"{in_dusun}, {in_kecamatan}"
+            
             db.collection("harga_realtime").add({
-                "komoditas": input_nama,
-                "harga_angka": input_harga, # Kita simpan angka murni buat statistik
-                "range_harga": f"Rp {input_harga:,}".replace(",", "."),
-                "judul_berita": f"Laporan: {input_nama}",
+                "komoditas": in_nama,
+                "harga_angka": in_harga,
+                "range_harga": f"Rp {in_harga:,}".replace(",", "."),
+                "judul_berita": f"Info: {in_nama}",
                 "waktu_ambil": datetime.datetime.now(),
-                "sumber": input_sumber,
-                "lokasi": input_lokasi,
-                "status": "User Report"
+                "sumber": in_sumber,
+                "lokasi": lokasi_fix,
+                "status": "Verified User"
             })
-            st.success("Data masuk! Terima kasih kontribusinya.")
+            st.balloons() # Efek balon biar seru
+            st.success(f"Mantap! Harga {in_nama} di {lokasi_fix} berhasil disimpan.")
+            
+            # Auto refresh biar datanya langsung kelihatan
+            import time
+            time.sleep(2)
             st.rerun()
         else:
-            st.warning("Mohon isi harga dan lokasi dengan benar.")
-
-# --- HALAMAN UTAMA: DASHBOARD EKSEKUTIF ---
-st.title("📈 Mentawai Market Intelligence")
-st.markdown("Dashboard monitoring harga komoditas real-time untuk pengambilan keputusan.")
-st.divider()
-
-# 3. LOGIKA FILTER (SEARCH ENGINE)
-col_filter1, col_filter2 = st.columns([1, 2])
-
-with col_filter1:
-    filter_komoditas = st.selectbox("🔍 Pilih Komoditas:", ["Semua", "Kopra Kering", "Cengkeh", "Gurita", "Pinang", "Kakao"])
-
-with col_filter2:
-    filter_lokasi = st.text_input("📍 Cari Lokasi (Ketik nama desa/kecamatan):", placeholder="Cari Sikakap, Siberut, Sipora...")
-
-# 4. AMBIL DATA DARI DATABASE
-docs = db.collection('harga_realtime').order_by('waktu_ambil', direction=firestore.Query.DESCENDING).limit(100).stream()
-
-# Proses Data ke DataFrame
-data_list = []
-for doc in docs:
-    d = doc.to_dict()
-    # Handle data lama yang formatnya beda
-    lokasi_fix = d.get('lokasi') if d.get('lokasi') else d.get('sumber', '-')
-    harga_fix = d.get('harga_angka') if d.get('harga_angka') else 0
-    
-    data_list.append({
-        "Komoditas": d.get('komoditas'),
-        "Harga (Rp)": d.get('range_harga'),
-        "Harga_Angka": harga_fix, # Kolom tersembunyi buat hitung-hitungan
-        "Lokasi": lokasi_fix,
-        "Sumber Info": d.get('sumber'),
-        "Waktu Update": format_wib(d.get('waktu_ambil')),
-        "Raw_Time": d.get('waktu_ambil') # Buat sorting
-    })
-
-df = pd.DataFrame(data_list)
-
-# 5. TERAPKAN FILTER
-if not df.empty:
-    # Filter Komoditas
-    if filter_komoditas != "Semua":
-        df = df[df['Komoditas'] == filter_komoditas]
-    
-    # Filter Lokasi (Search Text)
-    if filter_lokasi:
-        df = df[df['Lokasi'].str.contains(filter_lokasi, case=False, na=False)]
-
-    # 6. TAMPILKAN METRIK STATISTIK (PROFESIONAL LOOK)
-    # Cuma muncul kalau user memilih filter spesifik (biar datanya relevan)
-    if filter_komoditas != "Semua" and not df.empty:
-        avg_price = df[df['Harga_Angka'] > 0]['Harga_Angka'].mean()
-        max_price = df[df['Harga_Angka'] > 0]['Harga_Angka'].max()
-        min_price = df[df['Harga_Angka'] > 0]['Harga_Angka'].min()
-        
-        st.subheader(f"Statistik Harga: {filter_komoditas}")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Harga Tertinggi", f"Rp {max_price:,.0f}".replace(",", "."))
-        m2.metric("Harga Rata-rata", f"Rp {avg_price:,.0f}".replace(",", "."))
-        m3.metric("Harga Terendah", f"Rp {min_price:,.0f}".replace(",", "."))
-        st.divider()
-
-    # 7. TABEL DATA UTAMA
-    st.subheader("📋 Data Pasar Terkini")
-    
-    # Tampilkan tabel tanpa kolom rahasia
-    tabel_show = df[["Komoditas", "Harga (Rp)", "Lokasi", "Sumber Info", "Waktu Update"]]
-    st.dataframe(
-        tabel_show, 
-        use_container_width=True, 
-        hide_index=True,
-        column_config={
-            "Waktu Update": st.column_config.TextColumn("Waktu Update", help="Waktu dalam WIB"),
-            "Harga (Rp)": st.column_config.TextColumn("Harga (Rp)", width="medium")
-        }
-    )
-    
-    # Tombol Refresh Manual (Tetap perlu karena web socket mahal)
-    if st.button('🔄 Sinkronisasi Server', help="Tarik data terbaru dari pusat"):
-        st.rerun()
-
-else:
-    st.warning("Data tidak ditemukan. Coba ganti kata kunci pencarian.")
+            st.error("Waduh, Harga dan Nama Dusun wajib diisi ya bro!")
